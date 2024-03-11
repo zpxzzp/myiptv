@@ -4,19 +4,22 @@ import org.xmlpull.v1.XmlPullParser
 import org.xmlpull.v1.XmlPullParserFactory
 import java.io.IOException
 import java.io.InputStream
-import java.time.LocalDateTime
-import java.time.format.DateTimeFormatter
-import java.time.format.DateTimeParseException
+import java.text.ParseException
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class ProgramParser {
-    fun parse(input: InputStream): Map<String, Program> {
+    val dateTimeFormat = SimpleDateFormat("yyyyMMddHHmmss Z", Locale.getDefault())
+
+    fun parse(input: InputStream): Collection<Program> {
         val factory = XmlPullParserFactory.newInstance()
         val parser = factory.newPullParser()
         parser.setInput(input, "UTF-8")
 
         val channels = mutableListOf<Channel>()
         val programmes = mutableListOf<Programme>()
-        val now = LocalDateTime.now()
+        val now = Date()
         while (parser.next() != XmlPullParser.END_DOCUMENT) {
             if (parser.eventType != XmlPullParser.START_TAG) {
                 continue
@@ -27,7 +30,7 @@ class ProgramParser {
                 "channel" -> channels.add(parseChannel(parser))
                 "programme" -> {
                     val programme = parseProgramme(parser)
-                    if (programme.stop.isAfter(now)) { // skip past programme
+                    if (programme.stop.after(now)) { // skip past programme
                         programmes.add(programme)
                     }
                 }
@@ -43,7 +46,7 @@ class ProgramParser {
         for (item in programmes) {
             result[item.channel]?.items?.add(item)
         }
-        return result
+        return result.values
     }
 
     private fun parseChannel(parser: XmlPullParser): Channel {
@@ -82,10 +85,10 @@ class ProgramParser {
         }
 
         try {
-            val startTime = LocalDateTime.parse(start, dateTimeFormatter)
-            val stopTime = LocalDateTime.parse(stop, dateTimeFormatter)
-            return Programme(channel, startTime, stopTime, title, description)
-        } catch (e: DateTimeParseException) {
+            val startTime = dateTimeFormat.parse(start)
+            val stopTime = dateTimeFormat.parse(stop)
+            return Programme(channel, startTime!!, stopTime!!, title, description)
+        } catch (e: ParseException) {
             throw IOException("date time parsing failed", e)
         }
     }
@@ -117,9 +120,5 @@ class ProgramParser {
                 XmlPullParser.START_TAG -> depth++
             }
         }
-    }
-
-    companion object {
-        val dateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMddHHmmss Z")
     }
 }

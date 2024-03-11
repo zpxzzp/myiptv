@@ -3,6 +3,7 @@ package com.github.cgang.myiptv
 import android.content.Intent
 import android.content.SharedPreferences
 import android.os.Bundle
+import android.os.Handler
 import android.util.Log
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -15,17 +16,21 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.core.view.isVisible
+import androidx.fragment.app.Fragment
 import androidx.preference.PreferenceManager
+import com.github.cgang.myiptv.xmltv.Program
 
 /**
  * The base activity for playback.
  */
 open class MainActivity : AppCompatActivity() {
-    lateinit var preferences: SharedPreferences
+    private lateinit var preferences: SharedPreferences
     private lateinit var changeSettings: ActivityResultLauncher<Intent>
     private val viewModel: PlaylistViewModel by viewModels()
     private var lastPlaylistUrl: String? = null
     private var lastEpgUrl: String? = null
+    private var programInfoExpired: Long = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         Log.d(TAG, "onCreate()")
@@ -34,6 +39,7 @@ open class MainActivity : AppCompatActivity() {
         supportFragmentManager
             .beginTransaction()
             .add(R.id.playlist_fragment, PlaylistFragment(viewModel))
+            .add(R.id.program_info_fragment, ProgramInfoFragment(this))
             .commit()
 
         preferences = PreferenceManager.getDefaultSharedPreferences(this)
@@ -42,11 +48,18 @@ open class MainActivity : AppCompatActivity() {
                 onPreferenceChanged()
             }
 
+        viewModel.getPlayingChannel().observe(this) {
+            play(it)
+        }
+
         viewModel.getPlaylist().observe(this) {
             updatePlaylist(it)
         }
         viewModel.getTvgUrl().observe(this) {
             updateTvgUrl(it)
+        }
+        viewModel.getProgram().observe(this) {
+            updateProgramInfo(it)
         }
 
         onPreferenceChanged()
@@ -79,9 +92,8 @@ open class MainActivity : AppCompatActivity() {
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        Log.d(TAG, "onTouchEvent($event)")
-        val controlsLayout = findViewById<FrameLayout>(R.id.playlist_fragment)
-        if (controlsLayout.visibility == View.VISIBLE) {
+        val layout = findFrameLayout(R.id.playlist_fragment)
+        if (layout.visibility == View.VISIBLE) {
             return if (event.action == MotionEvent.ACTION_UP) {
                 hideControls()
                 true
@@ -89,9 +101,10 @@ open class MainActivity : AppCompatActivity() {
                 super.onTouchEvent(event)
             }
         }
+
         return if (event.action == MotionEvent.ACTION_UP) {
             viewModel.setGroup("") // disable group
-            controlsLayout.visibility = View.VISIBLE
+            layout.visibility = View.VISIBLE
             showControls()
             true
         } else {
@@ -99,27 +112,86 @@ open class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun showFragment(frag: Fragment) {
+        supportFragmentManager.beginTransaction()
+            .show(frag)
+            .commit()
+    }
+
+    private fun hideFragment(frag: Fragment) {
+        supportFragmentManager.beginTransaction()
+            .hide(frag)
+            .commit()
+    }
 
     private fun showControls() {
-        val frag = supportFragmentManager.findFragmentById(R.id.playlist_fragment)
-        if (frag is PlaylistFragment) {
-            supportFragmentManager.beginTransaction()
-                .show(frag)
-                .commit()
-            frag.listView.requestFocus()
+        playlistFrag()?.let {
+            showFragment(it)
+            it.listView.requestFocus()
         }
     }
 
     fun hideControls() {
         Log.d(TAG, "Trying to hide controls")
+        val layout = findFrameLayout(R.id.playlist_fragment)
+        playlistFrag()?.let {
+            if (layout.isVisible) {
+                hideFragment(it)
+                layout.visibility = View.GONE
+                hideSystemUI()
+            }
+        }
+    }
+
+    private fun playlistFrag(): PlaylistFragment? {
         val frag = supportFragmentManager.findFragmentById(R.id.playlist_fragment)
-        val layout = findViewById<FrameLayout>(R.id.playlist_fragment)
-        if (layout.visibility == View.VISIBLE && frag != null) {
-            supportFragmentManager.beginTransaction()
-                .hide(frag)
-                .commit()
-            layout.visibility = View.GONE
-            hideSystemUI()
+        return if (frag is PlaylistFragment) frag else null
+    }
+
+    private fun playbackFrag(): PlaybackFragment? {
+        val frag = supportFragmentManager.findFragmentById(R.id.playback_fragment_root)
+        return if (frag is PlaybackFragment) frag else null
+    }
+
+    private fun programInfoFrag(): ProgramInfoFragment? {
+        val frag = supportFragmentManager.findFragmentById(R.id.program_info_fragment)
+        return if (frag is ProgramInfoFragment) frag else null
+    }
+
+    private fun findFrameLayout(resId: Int): FrameLayout {
+        return findViewById(resId)
+    }
+
+    private fun showProgramInfo(frag: ProgramInfoFragment) {
+        if (findFrameLayout(R.id.playlist_fragment).isVisible) {
+            return
+        }
+
+        val layout = findFrameLayout(R.id.program_info_fragment)
+        if (layout.isVisible) {
+            return
+        }
+
+        programInfoExpired = System.currentTimeMillis() + PROGRAM_INFO_TTL
+        showFragment(frag)
+        layout.visibility = View.VISIBLE
+
+        Handler(mainLooper).postDelayed({
+            hideProgramInfo()
+        }, PROGRAM_INFO_TTL)
+    }
+
+    private fun hideProgramInfo() {
+        if (System.currentTimeMillis() < programInfoExpired) {
+            return
+        }
+
+        val layout = findFrameLayout(R.id.program_info_fragment)
+        programInfoFrag()?.let {
+            if (layout.isVisible) {
+                hideFragment(it)
+                layout.visibility = View.GONE
+            }
         }
     }
 
@@ -159,15 +231,24 @@ open class MainActivity : AppCompatActivity() {
         return preferences.getBoolean(ENABLE_ALL_CHANNELS, false)
     }
 
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        return when (keyCode) {
+            KeyEvent.KEYCODE_CHANNEL_UP, KeyEvent.KEYCODE_CHANNEL_DOWN -> {
+                return true
+            }
+
+            else -> super.onKeyDown(keyCode, event)
+        }
+    }
+
     override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
-        Log.d(TAG, "onKeyUp($keyCode)")
         if (keyCode == KeyEvent.KEYCODE_MENU) {
             showConfig()
             return true
         }
 
-        val controlsLayout = findViewById<FrameLayout>(R.id.playlist_fragment)
-        if (controlsLayout.visibility == View.VISIBLE) {
+        val layout = findFrameLayout(R.id.playlist_fragment)
+        if (layout.isVisible) {
             return when (keyCode) {
                 KeyEvent.KEYCODE_BACK -> {
                     hideControls()
@@ -175,34 +256,33 @@ open class MainActivity : AppCompatActivity() {
                 }
 
                 KeyEvent.KEYCODE_DPAD_LEFT -> {
-                    viewModel.switchGroup(useAllChannels(), -1)
+                    viewModel.switchGroup(useAllChannels(), PREV)
                     return true
                 }
 
                 KeyEvent.KEYCODE_DPAD_RIGHT -> {
-                    viewModel.switchGroup(useAllChannels(), 1)
+                    viewModel.switchGroup(useAllChannels(), NEXT)
                     return true
                 }
 
                 else -> super.onKeyUp(keyCode, event)
             }
-
         }
 
         return when (keyCode) {
-            KeyEvent.KEYCODE_DPAD_UP -> {
-                switchChannel(1)
+            KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_CHANNEL_UP -> {
+                switchChannel(NEXT)
                 return true
             }
 
-            KeyEvent.KEYCODE_DPAD_DOWN -> {
-                switchChannel(-1)
+            KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_CHANNEL_DOWN -> {
+                switchChannel(PREV)
                 return true
             }
 
             KeyEvent.KEYCODE_DPAD_CENTER -> {
-                viewModel.resetGroup()
-                controlsLayout.visibility = View.VISIBLE
+                viewModel.updatePlaylist()
+                layout.visibility = View.VISIBLE
                 showControls()
                 return true
             }
@@ -221,47 +301,40 @@ open class MainActivity : AppCompatActivity() {
     }
 
     private fun updatePlaylist(playlist: Playlist) {
-        val frag = supportFragmentManager.findFragmentById(R.id.playlist_fragment)
-        if (frag is PlaylistFragment) {
-            frag.setPlaylist(playlist)
+        playlistFrag()?.setPlaylist(playlist)
+
+        playlist.default?.let {
+            playDefault(it)
         }
-        val channel = playlist.default ?: return
-        playDefault(channel)
     }
 
     private fun playDefault(channel: Channel) {
-        val frag = supportFragmentManager.findFragmentById(R.id.playback_fragment_root)
-        if (frag is PlaybackFragment) {
-            if (frag.playDefault(channel)) {
-                hideControls()
-            }
+        if (playbackFrag()?.playDefault(channel) == true) {
+            hideControls()
         }
     }
 
-    fun play(channel: Channel) {
-        val frag = supportFragmentManager.findFragmentById(R.id.playback_fragment_root)
-        if (frag is PlaybackFragment) {
-            frag.switchTo(channel)
+    private fun play(channel: Channel) {
+        playbackFrag()?.let {
+            it.switchTo(channel)
             hideControls()
         }
     }
 
     private fun switchChannel(step: Int) {
-        var current: String? = null
-        val playback = supportFragmentManager.findFragmentById(R.id.playback_fragment_root)
-        if (playback is PlaybackFragment) {
-            current = playback.lastUrl
+        playbackFrag()?.lastUrl?.let {
+            viewModel.switchChannel(it, step)
         }
+    }
 
-        if (current == null) {
-            Log.d(TAG, "current playing URL not found")
+    private fun updateProgramInfo(program: Program?) {
+        if (program == null) {
             return
         }
 
-        val frag = supportFragmentManager.findFragmentById(R.id.playlist_fragment)
-        if (frag is PlaylistFragment && playback is PlaybackFragment) {
-            viewModel.switchChannel(current, step)?.let {
-                playback.switchTo(it)
+        programInfoFrag()?.let {
+            if (it.setProgram(program)) {
+                showProgramInfo(it)
             }
         }
     }
@@ -273,6 +346,8 @@ open class MainActivity : AppCompatActivity() {
         const val BUFFER_DURATION = "BufferDuration"
         const val PREFER_PLAYLIST_EPG = "PreferPlaylistEPG"
         const val ENABLE_ALL_CHANNELS = "EnableAllChannelsGroup"
+        const val PREV = -1
+        const val NEXT = 1
+        const val PROGRAM_INFO_TTL = 5 * 1000L // milliseconds
     }
 }
-
